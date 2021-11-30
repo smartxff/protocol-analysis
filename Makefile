@@ -1,6 +1,6 @@
 MKDIR_P = mkdir -p
 DIR = bin
-objects = handshake disconnect
+objects = handshake disconnect sendmessage
 
 all: createdir $(objects)
 
