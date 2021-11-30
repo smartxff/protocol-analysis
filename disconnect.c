@@ -21,18 +21,29 @@ struct udp_front
 	u_int8_t protocol;  //协议类型
 	u_int16_t len;   //协议长度
 };
-int write_data(int ip_seq,unsigned int tcp_seq, unsigned int remote_seq);
+
+struct flags 
+{
+	unsigned short fin;
+	unsigned short syn;
+	unsigned short rst;
+	unsigned short psh;
+	unsigned short ack;
+	unsigned short urg;
+	
+};
+
+int read_data(int * ip_seq,unsigned int * tcp_seq,unsigned int * remote_seq);
 //计算三层校验码
 u_int16_t in_chksum(u_int16_t *addr, int len);
 //计算四层校验码
 u_int16_t tcp_check(char *sendbuf, int len, const struct udp_front front);
 //构造syn数据包
-int make_message(char *sendbuf, int send_buf_len, char **argv);
-//构造ack数据包
-int make_message_ACK(char *sendbuf, int send_buf_len, char **argv, unsigned int ack_seq);
-int my_seq = 100;
-//下一个要发送的包的seq，被对端ack过
-unsigned int acked_my_tcp_seq = 100000000;
+int make_message(char *sendbuf, int send_buf_len, char **argv, unsigned int ack_seq, struct flags fg);
+int my_seq;
+//acked_my_tcp_seq: 被对端确认过的seq号，即下一个数据包的seq号
+//remote_seq：上一次收到的数据包的seq号
+unsigned int acked_my_tcp_seq,remote_seq;
 
 int main(int argc, char **argv)
 {
@@ -40,10 +51,13 @@ int main(int argc, char **argv)
 		printf("Useage: %s <source_ip> <source_port> <dest_ip> <dest_port>\n\n",argv[0]);
 		return -1;
 	}
+	read_data(&my_seq,&acked_my_tcp_seq,&remote_seq);
+	printf("my_seq: %d,acked_my_tcp_seq:%u,remote_seq: %u\n",my_seq,acked_my_tcp_seq,remote_seq);
 	int raw_sockfd,i;
 	int size = 1024;
 	char send_message[MAXLINE];
 	struct sockaddr_in server_address;
+	struct flags fg;
 	
 	//创建原始socket
 	raw_sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
@@ -55,12 +69,16 @@ int main(int argc, char **argv)
 	setsockopt(raw_sockfd, IPPROTO_IP, IP_HDRINCL, &size, sizeof(size));
 
 	bzero(&send_message, sizeof(send_message));
-
+	
+	bzero(&fg,sizeof(fg));
+	fg.fin = 1;
+	fg.ack = 1;
+	my_seq++;
 	//拼接完整的TCP数据包(IP头+TCP头+数据)
-	int mesg_len = make_message(send_message, MAXLINE, argv);
+	int mesg_len = make_message(send_message, MAXLINE, argv,remote_seq,fg);
 	printf("mesg_len: %d\n",mesg_len);
 
-	//发送syn消息
+	//发送fin消息
 	sendto(raw_sockfd,send_message, mesg_len, 0, (struct sockaddr *)&server_address, sizeof(server_address));
 	//接收syn+ack消息
 	printf("receive SYN_ACK start:-----------------------------------------\n");
@@ -80,39 +98,36 @@ int main(int argc, char **argv)
 		// 检查目的端口是否正常
         	unsigned short dst_port = ntohs(*(unsigned short *)(rec+ipheadlen+2));
 		printf("\ntcp dst port: %d,%d\n",dst_port,atoi(argv[2]));	
-		if(atoi(argv[2]) == dst_port )
-			break;
-	}
-	unsigned short iplength = ntohs(*((unsigned short *)(rec+2))); //获取IP数据报长度
-	printf("iplengthAll: %d\n", iplength);
-	// ip头部 + 4(端口) + 4(seq) 
-	// ntohl 从网络字节顺序转换为主机字节顺序 
-	unsigned int seq = ntohl(*((signed int*)(rec+ipheadlen+4)));
-	//确认号
-	unsigned int ack = ntohl(*((signed int*)(rec+ipheadlen+8)));
-	//收到对端的确认包，记录确认号
-	acked_my_tcp_seq = ack;
-	unsigned char flag = rec[ipheadlen + 13];
-	printf("flag: %02x\n", flag);
+		//非目标端口则继续接收数据包
+		if(atoi(argv[2]) != dst_port )
+			continue;
 
-	flag = (flag & 0x12);   // 只需要ACK和SYn标志的值，其他位都清0
-	if(flag != 0x12){       // 判断是否为syn+ack包
-		printf("ACK+SYN\n");
-	}else{
-		printf("OK ACK+SYN\n");
-		//unsigned int ack_seq = ack;
-		unsigned int ack_seq = seq;
-		int mesg_len_a = make_message_ACK(send_message, MAXLINE, argv, ack_seq);
-		sendto(raw_sockfd, send_message, mesg_len_a, 0, (struct sockaddr *)&server_address, sizeof(server_address));
+		unsigned short iplength = ntohs(*((unsigned short *)(rec+2))); //获取IP数据报长度
+		printf("iplengthAll: %d\n", iplength);
+		// ip头部 + 4(端口) + 4(seq) 
+		// ntohl 从网络字节顺序转换为主机字节顺序 
+		unsigned int seq = ntohl(*((signed int*)(rec+ipheadlen+4)));
+		//确认号
+		unsigned int ack = ntohl(*((signed int*)(rec+ipheadlen+8)));
+		unsigned char flag = rec[ipheadlen + 13];
+		printf("flag: %02x\n", flag);
+		if (0x12 == (flag & 0x12) || 0x01 == (flag & 0x01))   // 只需要ACK和SYN标志的值，其他位都清0
+		{
+			if (0x12 == (flag & 0x12)) printf("ok ACK+");
+			else	printf("OK ACK+SYN\n");
+			bzero(&fg,sizeof(fg));
+        		fg.ack = 1;		
+			my_seq++;
+			//假装收到了对面的ack
+			acked_my_tcp_seq++;
+			unsigned int ack_seq = seq;
+			int mesg_len_a = make_message(send_message, MAXLINE, argv, ack_seq,fg);
+			sendto(raw_sockfd, send_message, mesg_len_a, 0, (struct sockaddr *)&server_address, sizeof(server_address));
+		}
+		break;
 		
 	}
 	
-	//unsigned int ack_seq = ack;
-	unsigned int ack_seq = seq;
-	//将序号信息保存到本地
-	write_data(my_seq,acked_my_tcp_seq,seq);
-	int mesg_len_a = make_message_ACK(send_message, MAXLINE, argv, ack_seq);
-	sendto(raw_sockfd, send_message,mesg_len_a, 0, (struct sockaddr *)&server_address, sizeof(server_address));
 	close(raw_sockfd);
 	return 0;
 }
@@ -160,71 +175,8 @@ unsigned short tcp_check(char *sendbuf, int len, const struct udp_front front)
 	return in_chksum((unsigned short *)str, sizeof(front) + len);
 } 
 
-int make_message(char *sendbuf, int send_buf_len, char **argv)
-{
-	//建立握手过程中无法传输数据
-	char message[]={""};
-	struct iphdr *ip;
-	//填充ip头信息
-	ip = (struct iphdr *)sendbuf;
-	ip->ihl = sizeof(struct iphdr) >> 2;    //首部长度
-	ip->version = 4;	//ip协议版本
-	ip->tos = 0;		//服务类型
-	ip->tot_len =0;		//总长度
-	ip->id = htons(my_seq);  //seq id值
-	ip->frag_off = 0;	
-	ip->ttl = 128;
-	ip->protocol = IPPROTO_TCP;
-	ip->check = 0;		//内核会算出相应的校验和
-	//将点分十进制的IP转换成一个长整数整形。
-	ip->saddr = inet_addr(argv[1]);
-	ip->daddr = inet_addr(argv[3]);
-	struct udp_front front;
-	front.srcip = ip->saddr;
-	front.desip = ip->daddr;
-	front.len = htons(20 + strlen(message));
-	printf("____________________________DATA:%d_______________________", strlen(message));
-	front.protocol = 6;
-	front.zero = 0;
-	
-	struct tcphdr *tcp;
-	tcp = (struct tcphdr *)(sendbuf + sizeof(struct iphdr));
-	bzero(tcp, sizeof(struct tcphdr *));
-	// 填充tcp头信息
-	tcp->source = htons(atoi(argv[2]));    //需要把主机序转换为网络序
-	tcp->dest = htons(atoi(argv[4]));
-	tcp->seq = htonl(acked_my_tcp_seq);
-	
-	tcp->doff = 5;     //数据偏移(TCP头部字节长度/4)
-	tcp->res1 = 0;		// 保留字段(4位)
-	tcp->fin = 0;		//用来释放一个连接
-	tcp->syn = 1;		//表示这是一个连接请求
-	tcp->rst = 0;		//用来表示tcp连接释放出现严重差错
-	tcp->psh = 0;		// 推送
-	tcp->ack = 0;		// 表示是一个确认
-	tcp->urg = 0;		// 紧急数据
-	tcp->res2 = 0;		// 保留字段
-	tcp->window = htons(65535);  //初始窗口值设置
-	
-	tcp->check = 0;
-	tcp->urg_ptr = 0;
-	tcp->check = 0;                     
-	strcpy((sendbuf+20+20), message);  //把mesage存入Ip+tcp头部之后
-	
-	tcp->check = tcp_check((sendbuf+20), 20+strlen(message), front);
-	
-	ip->tot_len = (20 + 20 + strlen(message));  //ip头长度+TCP头长度+数据长度 = 总长度
-	printf("ip->tot_len:%d\n", ip->tot_len);
-	ip->check = tcp_check((sendbuf+20), 20+strlen(message), front);
 
-	ip->tot_len = (20 + 20 + strlen(message));
-	printf("ip->tot_len:%d\n",ip->tot_len);
-	ip->check = in_chksum((unsigned short *)sendbuf, 20);
-	
-	return (ip->tot_len);
-}
-
-int make_message_ACK(char *sendbuf, int send_buf_len, char **argv, unsigned int ack_seq)
+int make_message(char *sendbuf, int send_buf_len, char **argv, unsigned int ack_seq, struct flags fg)
 {
 	char message[]={""};
 	printf("Data OK: ->%s\n", message);
@@ -234,7 +186,7 @@ int make_message_ACK(char *sendbuf, int send_buf_len, char **argv, unsigned int 
 	ip->version = 4;
 	ip->tos = 0;
 	ip->tot_len = 0;
-	ip->id = htons(my_seq + 1);
+	ip->id = htons(my_seq);
 	ip->frag_off = 0;
 	ip->ttl = 128;
 	ip->protocol = IPPROTO_TCP;
@@ -261,15 +213,17 @@ int make_message_ACK(char *sendbuf, int send_buf_len, char **argv, unsigned int 
 	tcp->dest = htons(atoi(argv[4]));
 	tcp->seq = htonl(acked_my_tcp_seq);
 	printf("\nack_seq:%lx,hack_seq:%lx",ack_seq+1,htonl(ack_seq+1));
-	tcp->ack_seq = htonl(ack_seq + 1);
+	if(ack_seq != 0){
+		tcp->ack_seq = htonl(ack_seq + 1);
+	}
 	tcp->doff = 5;
 	tcp->res1 = 0;
-	tcp->fin = 0;
-	tcp->syn = 0;
-	tcp->rst = 0;
-	tcp->psh = 0;
-	tcp->ack = 1;
-	tcp->urg = 0;
+	tcp->fin = fg.fin;
+	tcp->syn = fg.syn;
+	tcp->rst = fg.rst;
+	tcp->psh = fg.psh;
+	tcp->ack = fg.ack;
+	tcp->urg = fg.urg;
 	tcp->res2 = 0;
 	tcp->window = htons(65535);
 	tcp->check = 0;
@@ -283,15 +237,14 @@ int make_message_ACK(char *sendbuf, int send_buf_len, char **argv, unsigned int 
 	ip->check = in_chksum((unsigned short *)sendbuf, 20);
 	return (ip->tot_len);
 }
-
-int write_data(int ip_seq,unsigned int tcp_seq, unsigned int remote_seq)
+int read_data(int * ip_seq,unsigned int * tcp_seq,unsigned int * remote_seq)
 {
-	 FILE *fp;
-        if((fp=fopen("/tmp/.tcpinfo", "wb+"))==NULL){
+        FILE *fp;
+        if((fp=fopen("/tmp/.tcpinfo", "rb+"))==NULL){
                 printf("Cannot open file strike any key exit!");
                 return 1;
         }
-        fprintf(fp, "%d,%u,%u\n",ip_seq,tcp_seq,remote_seq);
+        fscanf(fp,"%d,%u,%u\n",ip_seq,tcp_seq,remote_seq);
         fclose(fp);
-        return 0;
 }
+
