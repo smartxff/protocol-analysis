@@ -1,6 +1,6 @@
 MKDIR_P = mkdir -p
 DIR = bin
-objects = handshake disconnect sendmessage
+objects = handshake disconnect sendmessage fastretransmit server
 
 all: createdir $(objects)
 
