@@ -182,7 +182,7 @@ int make_message(char *sendbuf, int send_buf_len, char **argv)
 	struct udp_front front;
 	front.srcip = ip->saddr;
 	front.desip = ip->daddr;
-	front.len = htons(20 + strlen(message));
+	front.len = htons(24 + strlen(message));
 	printf("____________________________DATA:%d_______________________", strlen(message));
 	front.protocol = 6;
 	front.zero = 0;
@@ -195,7 +195,8 @@ int make_message(char *sendbuf, int send_buf_len, char **argv)
 	tcp->dest = htons(atoi(argv[4]));
 	tcp->seq = htonl(acked_my_tcp_seq);
 	
-	tcp->doff = 5;     //数据偏移(TCP头部字节长度/4)
+	//tcp->doff = 5;     //数据偏移(TCP头部字节长度/4)
+	tcp->doff = 6;     //数据偏移(TCP头部字节长度/4)
 	tcp->res1 = 0;		// 保留字段(4位)
 	tcp->fin = 0;		//用来释放一个连接
 	tcp->syn = 1;		//表示这是一个连接请求
@@ -210,17 +211,22 @@ int make_message(char *sendbuf, int send_buf_len, char **argv)
 	tcp->urg_ptr = 0;
 	tcp->check = 0;                     
 	strcpy((sendbuf+20+20), message);  //把mesage存入Ip+tcp头部之后
-	
-	tcp->check = tcp_check((sendbuf+20), 20+strlen(message), front);
-	
-	ip->tot_len = (20 + 20 + strlen(message));  //ip头长度+TCP头长度+数据长度 = 总长度
-	printf("ip->tot_len:%d\n", ip->tot_len);
-	ip->check = tcp_check((sendbuf+20), 20+strlen(message), front);
 
-	ip->tot_len = (20 + 20 + strlen(message));
+	unsigned int * ptr = (unsigned int *)(tcp + 1);
+	*ptr = htonl((1 << 24) |
+			       (1 << 16) |
+			       (4 << 8) |
+			       2);
+	
+	//tcp->check = tcp_check((sendbuf+20), 20+strlen(message), front);
+	tcp->check = tcp_check((sendbuf+20), 24+strlen(message), front);
+	
+	ip->tot_len = (20 + 24 + strlen(message));  //ip头长度+TCP头长度+数据长度 = 总长度
 	printf("ip->tot_len:%d\n",ip->tot_len);
 	ip->check = in_chksum((unsigned short *)sendbuf, 20);
 	
+	
+	print_hex((unsigned char *)tcp,  100);
 	return (ip->tot_len);
 }
 
